@@ -11,7 +11,8 @@ import re
 import sqlite3
 import sys
 import time
-#import traceback # todo remove
+import urllib.parse
+import traceback # todo remove
 
 # Actual version:
 __version__ = "0.1.6"
@@ -33,7 +34,7 @@ DEFAULT_ENCODING = "ISO-8859-15"
 DEFAULT_EXPORT = False
 # Log failed mails (default):
 DEFAULT_FAILURES = None
-# Format resu
+# Format result
 DEFAULT_FORMAT = "%Y"
 # Create result index (default):
 DEFAULT_INDEX = False
@@ -47,6 +48,8 @@ DEFAULT_QUIET = False
 DEFAULT_SEPARATOR = "."
 # Or logic for filter
 DEFAULT_FILTER_OR_LOGIC = False
+# Output type
+DEFAULT_OUTPUT_TYPE = "mbox"
 
 class FilterBaseException(Exception):
 	mesg=""
@@ -108,18 +111,20 @@ class Filter:
 	# Do sorting by default:
 	sort_date_default = DEFAULT_FORMAT
 	# Keep sort keys in list:
-	sort_keys = []  
-	def __init__(self, output=DEFAULT_OUTPUT, archive=DEFAULT_ARCHIVE, indexing=DEFAULT_INDEX, filters=[], filter_or_logic=DEFAULT_FILTER_OR_LOGIC, selectors=[], caching=DEFAULT_CACHEING, separator=DEFAULT_SEPARATOR, failures=DEFAULT_FAILURES, export_payload=DEFAULT_EXPORT, reduce_payload=DEFAULT_REDUCE, payload_exportpath=None, quiet=DEFAULT_QUIET):
+	sort_keys = []
+	# Output type ("mbox" or "maildir")
+	output_type = "mbox"
+	def __init__(self, output=DEFAULT_OUTPUT, output_type=DEFAULT_OUTPUT_TYPE, archive=DEFAULT_ARCHIVE, indexing=DEFAULT_INDEX, filters=[], filter_or_logic=DEFAULT_FILTER_OR_LOGIC, selectors=[], caching=DEFAULT_CACHEING, separator=DEFAULT_SEPARATOR, failures=DEFAULT_FAILURES, export_payload=DEFAULT_EXPORT, reduce_payload=DEFAULT_REDUCE, payload_exportpath=None, quiet=DEFAULT_QUIET):
 		""" Initialize a Filter object.
 			archive
 				Archives emails. Same as indexing=True and selectors=[("Date", "Y")] (default False)
 
 			caching
 				Caches resultset. Disables output and indexing. (default False)
-		
+
 			export_payload
 				Exports payloads with a filename attribute (default False)
-				
+
 			indexing
 				Creates a index database called index.sqlite3. (default False)
 
@@ -130,8 +135,8 @@ class Filter:
 				List of tuples, e.g. ("From", regexp), ("To", regexp) or ("Date", format)
 
 			output
-				Redirets output to the given directory (default ./)
-	 
+				Redirects output to the given directory (default ./)
+
 			payload_exportpath path
 				Exports payloads into directory (default see output)
 
@@ -151,6 +156,7 @@ class Filter:
 		self.output = output
 		if self.output is None or not os.path.isdir(self.output):
 			raise DirectoryNotExisting(self.output)
+		self.output_type = output_type
 		# Archive mailbox:
 		self.archive = archive
 		# Filter mbox by list of filters:
@@ -202,7 +208,7 @@ class Filter:
 			self.failed_mails.append(mail)
 		elif self.failure_path:
 			self.output_mail(open(os.path.normpath(self.failure_path), "a"), mail)
-	
+
 	def output_attachment(self, path, content):
 		""" Write file to path. """
 		with open(path, "w+b") as fd:
@@ -213,9 +219,9 @@ class Filter:
 		genr = email.generator.Generator(handle, True, 0)
 		genr.flatten(mail, True)
 		# Close mbox entry explicit:
-		handle.write("\n")	  
+		handle.write("\n")
 
-			
+
 	def filter_mbox(self, obj):
 		""" Filter a mbox file or mailbox.mbox instance. """
 		if isinstance(obj, str):
@@ -252,7 +258,7 @@ class Filter:
 		for header, regexp in self.filters:
 			inner_boolean = False
 			for header_value in header_values(header, mail):
-				# True if any header part is true:  
+				# True if any header part is true:
 				inner_boolean |= self.filter_item_pass(header, regexp, header_value)
 			# True if any filter items are true:
 			if self.filter_or_logic:
@@ -261,7 +267,7 @@ class Filter:
 			else:
 				boolean &= inner_boolean
 		return boolean
-				 
+
 	def filter_item_pass(self, header, regexp, strg):
 		""" Apply filter. """
 		try:
@@ -296,7 +302,8 @@ class Filter:
 		""" Write payload to file. """
 		fname = header_decode(payload.get_filename() or "")
 		if fname:
-			path = os.path.normpath("%s/%s" % (self.payload_exportpath, ".".join([email.utils.unquote(header_decode(mail["Message-ID"])), "%02d" %self.payload_index(payload, mail), fname])))
+			safe_message_id = urllib.parse.quote(decode_message_id(mail), safe='@')
+			path = os.path.normpath("%s/%s" % (self.payload_exportpath, ".".join([safe_message_id, "%02d" % self.payload_index(payload, mail), fname])))
 			self.output_attachment(path, self.payload_decode(payload))
 			self.exported += 1
 
@@ -363,7 +370,10 @@ class Filter:
 	def resultset_output(self, key, mail):
 		""" Write mail to a result set. """
 		handle = sys.stdout
-		if key is not None:
+		if self.output_type == "maildir":
+			safe_message_id = urllib.parse.quote(decode_message_id(mail), safe='@')
+			handle = open(os.path.normpath(self.output + "/" + safe_message_id + ".eml"), "wt")
+		elif key is not None:
 			handle = open(os.path.normpath(self.output + "/" + key + ".mbox"), "a")
 		self.output_mail(handle, mail)
 
@@ -384,7 +394,7 @@ class Filter:
 		""" Append key part to sort keys (generates n*m sort keys for n and m key parts)."""
 		new_keys = []
 		for value in values:
-			key_value = header_format(key, value, form) 
+			key_value = header_format(key, value, form)
 			# revoke empty key parts:
 			if len(key_value) > 0:
 				# No keys existing:
@@ -397,7 +407,7 @@ class Filter:
 				raise EmptyKeyPart()
 		# Reset to extended set of sort keys:
 		self.sort_keys = new_keys
-	  
+
 	def index_init(self):
 		""" Initialize the result index database. """
 		self.db = sqlite3.connect(self.index_path())
@@ -405,15 +415,15 @@ class Filter:
 
 	def index_add(self, mail):
 		""" Add mail header to result index. """
-		self.db.execute('INSERT INTO Mails ("MD5-Value", "Message-ID", "From", "To", "Cc", "Bcc", Date, "In-Reply-To", Subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (self.index_md5_value(mail), email.utils.unquote(header_decode(mail['Message-ID'])), header_decode(mail['From']), header_decode(mail['To']), header_decode(mail['CC']), header_decode(mail['BCC']), header_decode(mail['Date']), email.utils.unquote(header_decode(mail['In-Reply-To'])), header_decode(mail['Subject'])))
+		self.db.execute('INSERT INTO Mails ("MD5-Value", "Message-ID", "From", "To", "Cc", "Bcc", Date, "In-Reply-To", Subject) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (self.index_md5_value(mail), decode_message_id(mail), header_decode(mail['From']), header_decode(mail['To']), header_decode(mail['CC']), header_decode(mail['BCC']), header_decode(mail['Date']), email.utils.unquote(header_decode(mail['In-Reply-To'])), header_decode(mail['Subject'])))
 		self.db.commit()
 
 	def index_md5_value(self, mail):
 		""" Determine a MD5 value for mail. """
 		return md5_value(header_decode(mail["Message-ID"]) + header_decode(mail["Date"]) + header_decode(mail["From"]) + header_decode(mail["To"]))
-	  
+
 	def index_path(self):
-		""" Determine the to the result index. """
+		""" Determine the path to the result index. """
 		return os.path.normpath(self.output + "/" + self.resultset_index)
 
 def md5_value(strg):
@@ -421,7 +431,10 @@ def md5_value(strg):
 	md5 = hashlib.md5()
 	md5.update(strg.encode('UTF-8'))
 	return md5.hexdigest()
-	
+
+def decode_message_id(mail):
+	return email.utils.unquote(header_decode(mail["Message-ID"]))
+
 def header_decode(strg):
 	""" Decode header field. """
 	decoded = []
@@ -435,7 +448,7 @@ def header_email(strg):
 	if not addr[1]:
 		raise EmailMissed(strg)
 	return addr[1]
-	  
+
 def header_values(header, mail):
 	""" Split header into a list """
 	if header not in mail.keys():
@@ -464,8 +477,8 @@ def python_decode(strg, enc):
 		return strg.decode(enc)
 	return strg
 
-def cli_protocol(val):   
-	m = re.search("^([^,;$ ]+)(?:,(.*)|()$)", val)      
+def cli_protocol(val):
+	m = re.search("^([^,;$ ]+)(?:,(.*)|()$)", val)
 	if m:
 		return (m.group(1), m.group(2) or "")
 	raise CLIProtocollError()
@@ -475,22 +488,24 @@ def cli_info():
 
 def cli_usage():
 	sys.stderr.write("""Usage:
-	mboxfilter [--help] [--version] [--dir output] [--unique] [--archive]
+	mboxfilter [--help] [--version] [--type type] [--dir output] [--unique] [--archive]
 	[--filter_from regexp] [--filter_to regexp] [--filter_date regexp]
 	[--filter header,regexp] [--sort_from] [--sort_to] [--sort_date format]
-	[--sort header,regexp] [--failures path] [--quiet]
+	[--sort header,regexp] [--failures path] [--quiet] [--filter_or_logic]
 	[--export] [--exportpath path] [--reduce]
 	mbox ...\n""")
-	
+
 def cli():
 	""" Invoke mboxfilter from cmd."""
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], None, ["dir=", "unique", "archive", "sort_from", "filter_from=", "sort_date=", "filter_date=", "filter_to=", "sort_to", "filter=", "sort=", "help", "quiet", "version", "failures=", "export", "exportpath=", "reduce"])
+		opts, args = getopt.getopt(sys.argv[1:], None, ["dir=", "type=", "unique", "archive", "sort_from", "filter_from=", "sort_date=", "filter_date=", "filter_to=", "sort_to", "filter=", "sort=", "help", "quiet", "version", "failures=", "export", "exportpath=", "reduce"])
 		output = DEFAULT_OUTPUT
+		output_type = DEFAULT_OUTPUT_TYPE
 		selectors = []
 		archive = DEFAULT_ARCHIVE
 		filters = []
 		unique = False
+		filter_or_logic = DEFAULT_FILTER_OR_LOGIC
 		quiet = DEFAULT_QUIET
 		failures = DEFAULT_FAILURES
 		export = DEFAULT_EXPORT
@@ -499,7 +514,9 @@ def cli():
 		for opt, val in opts:
 			val = python_decode(val, sys.stdin.encoding)
 			if opt == "--dir":
-			 output = val
+				output = val
+			elif opt == "--type":
+				output_type = val
 			elif opt == "--archive":
 				archive = True
 			elif opt == "--unique":
@@ -538,7 +555,7 @@ def cli():
 				exportpath = val
 			elif opt == "--reduce":
 				reduce = True
-		filt = Filter(output=output, archive=archive, indexing=unique, filters=filters, filter_or_logic=filter_or_logic, selectors=selectors, failures=failures, export_payload=export, payload_exportpath=exportpath, reduce_payload=reduce, quiet=quiet)
+		filt = Filter(output=output, output_type=output_type, archive=archive, indexing=unique, filters=filters, filter_or_logic=filter_or_logic, selectors=selectors, failures=failures, export_payload=export, payload_exportpath=exportpath, reduce_payload=reduce, quiet=quiet)
 		for mbox in args:
 			filt.filter_mbox(mbox)
 		if not quiet:
