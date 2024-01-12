@@ -61,7 +61,7 @@ class FilterException(FilterBaseException):
 	def __init__(self, value):
 		self.value = value
 	def __str__(self):
-		return self.mesg %self.value
+		return self.mesg % self.value
 
 class DirectoryNotExisting(FilterException):
 	mesg = "directory not found: %s"
@@ -216,10 +216,17 @@ class Filter:
 
 	def output_mail(self, handle, mail):
 		""" Write email to filehandle. """
+		if handle is None:
+			handle = sys.stdout
+			should_close = False
+		else:
+			should_close = True
 		genr = email.generator.Generator(handle, True, 0)
 		genr.flatten(mail, True)
 		# Close mbox entry explicit:
 		handle.write("\n")
+		if should_close:
+			handle.close()
 
 
 	def filter_mbox(self, obj):
@@ -369,13 +376,25 @@ class Filter:
 
 	def resultset_output(self, key, mail):
 		""" Write mail to a result set. """
-		handle = sys.stdout
 		if self.output_type == "maildir":
-			safe_message_id = urllib.parse.quote(decode_message_id(mail), safe='@')
-			handle = open(os.path.normpath(self.output + "/" + safe_message_id + ".eml"), "wt")
-		elif key is not None:
-			handle = open(os.path.normpath(self.output + "/" + key + ".mbox"), "a")
+			handle = self.open_maildir_handle(key, mail)
+		else:
+			handle = self.open_mbox_handle(key)
 		self.output_mail(handle, mail)
+
+	def open_maildir_handle(self, key, mail):
+		if key is not None:
+			dir = os.path.join(os.path.normpath(self.output), key)
+			os.makedirs(dir, exist_ok=True)
+		else:
+			dir = os.path.normpath(self.output)
+		safe_message_id = urllib.parse.quote(decode_message_id(mail), safe='@')
+		return open(os.path.join(dir, safe_message_id + ".eml"), "w")
+
+	def open_mbox_handle(self, key):
+		if key is not None:
+			return open(os.path.join(os.path.normpath(self.output), key + ".mbox"), "a")
+		return None
 
 	def sort_keys_generate(self, mail):
 		""" Determine the sort keys for a mail. """
@@ -451,8 +470,9 @@ def header_email(strg):
 
 def header_values(header, mail):
 	""" Split header into a list """
-	if header not in mail.keys():
-		raise HeaderMissed(header)
+	if header not in mail:
+		error = "%s not in [%s], Subject: %s" % (header, ", ".join(mail.keys()), mail['Subject'])
+		raise HeaderMissed(error)
 	values = [header_decode(mail[header])]
 	if header in HEADER_ADDRESS_FIELDS:
 		return [email.utils.formataddr(x) for x in email.utils.getaddresses(values)]
